@@ -199,7 +199,6 @@ func (rc *RPCClient) startBatchDispatcher(dispatcherRootContext context.Context,
 						batch = nil
 						timeoutChannel = nil // stop the timeout and let it get reset by the next request
 					}
-
 				case <-timeoutChannel:
 					if len(batch) > 0 {
 						rc.dispatchBatch(rc.batchDispatcherContext, batch)
@@ -207,17 +206,6 @@ func (rc *RPCClient) startBatchDispatcher(dispatcherRootContext context.Context,
 						timeoutChannel = nil // stop the timeout and let it get reset by the next request
 					}
 				case <-rc.batchDispatcherContext.Done():
-					select { // drain the queue
-					case req := <-requestQueue:
-						batch = append(batch, req)
-					default:
-					}
-					for i, req := range batch {
-						// mark all queueing requests as failed
-						cancelCtxErr := i18n.NewError(rc.batchDispatcherContext, signermsgs.MsgRequestCanceledContext, req.rpcReq.ID)
-						batch[i].rpcErr <- cancelCtxErr
-					}
-
 					return
 				}
 			}

@@ -492,6 +492,12 @@ func TestBatchSyncRequestCanceledContext(t *testing.T) {
 		},
 	}).(*RPCClient)
 
+	// this checks request hit batch its own cancel context
+	reqCtx, cancelReqCtx := context.WithCancel(context.Background())
+	cancelReqCtx()
+	_, err = rb.SyncRequest(reqCtx, &RPCRequest{})
+	assert.Regexp(t, "FF22063", err)
+
 	checkDone := make(chan bool)
 	go func() {
 		_, err = rb.SyncRequest(ctx, &RPCRequest{})
@@ -501,12 +507,12 @@ func TestBatchSyncRequestCanceledContext(t *testing.T) {
 	close(blocked)
 	<-checkDone
 
-	// this checks request hit cancel context
-	_, err = rb.SyncRequest(ctx, &RPCRequest{})
+	// this checks request hit batch dispatcher cancel context
+	_, err = rb.SyncRequest(context.Background(), &RPCRequest{})
 	assert.Regexp(t, "FF22063", err)
 }
 
-func TestBatchSyncRequestCanceledContextWhenQueueing(t *testing.T) {
+func TestBatchSyncRequestCanceledContextWhenDispatcherContextCanceled(t *testing.T) {
 
 	ctx, cancelCtx := context.WithCancel(context.Background())
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -542,71 +548,71 @@ func TestBatchSyncRequestCanceledContextWhenQueueing(t *testing.T) {
 	<-checkDone
 }
 
-// func TestBatchSyncRequestCanceledContextFlushTheQueueWhenRootContextIsCancelled(t *testing.T) {
+func TestBatchSyncRequestCanceledContextWhenBlockedOnQueue(t *testing.T) {
 
-// 	ctx, cancelCtx := context.WithCancel(context.Background())
+	ctx, cancelCtx := context.WithCancel(context.Background())
 
-// 	// Define the expected server response to the batch
-// 	rpcServerResponseBatchBytes := []byte(`[
-// 		{
-// 			"jsonrpc": "2.0",
-// 			"id": 1,
-// 			"result": {
-// 				"hash": "0x61ca9c99c1d752fb3bda568b8566edf33ba93585c64a970566e6dfb540a5cbc1",
-// 				"nonce": "0x24"
-// 			}
-// 		}
-// 	]`)
+	// Define the expected server response to the batch
+	rpcServerResponseBatchBytes := []byte(`[
+		{
+			"jsonrpc": "2.0",
+			"id": 1,
+			"result": {
+				"hash": "0x61ca9c99c1d752fb3bda568b8566edf33ba93585c64a970566e6dfb540a5cbc1",
+				"nonce": "0x24"
+			}
+		}
+	]`)
 
-// 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-// 		w.Header().Add("Content-Type", "application/json")
-// 		w.Header().Add("Content-Length", strconv.Itoa(len(rpcServerResponseBatchBytes)))
-// 		w.WriteHeader(200)
-// 		w.Write(rpcServerResponseBatchBytes)
-// 	}))
-// 	defer server.Close()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Add("Content-Type", "application/json")
+		w.Header().Add("Content-Length", strconv.Itoa(len(rpcServerResponseBatchBytes)))
+		w.WriteHeader(200)
+		w.Write(rpcServerResponseBatchBytes)
+	}))
+	defer server.Close()
 
-// 	signerconfig.Reset()
-// 	prefix := signerconfig.BackendConfig
-// 	prefix.Set(ffresty.HTTPConfigURL, server.URL)
-// 	c, err := ffresty.New(ctx, signerconfig.BackendConfig)
-// 	assert.NoError(t, err)
+	signerconfig.Reset()
+	prefix := signerconfig.BackendConfig
+	prefix.Set(ffresty.HTTPConfigURL, server.URL)
+	c, err := ffresty.New(ctx, signerconfig.BackendConfig)
+	assert.NoError(t, err)
 
-// 	rpcConfig := config.RootSection("unittest")
-// 	InitConfig(rpcConfig)
-// 	rpcConfig.Set(ConfigBatchEnabled, true)
-// 	rpcConfig.Set(ConfigBatchTimeout, "2h") // very long delay
-// 	rpcConfig.Set(ConfigBatchSize, 1)
-// 	rpcConfig.Set(ConfigBatchMaxDispatchConcurrency, 1) // set max concurrency to 1 so it can be jammed easily
+	rpcConfig := config.RootSection("unittest")
+	InitConfig(rpcConfig)
+	rpcConfig.Set(ConfigBatchEnabled, true)
+	rpcConfig.Set(ConfigBatchTimeout, "2h") // very long delay
+	rpcConfig.Set(ConfigBatchSize, 1)
+	rpcConfig.Set(ConfigBatchDispatchConcurrency, 1) // set max concurrency to 1 so it can be jammed easily
 
-// 	rpcOptions := ReadConfig(ctx, rpcConfig)
+	rpcOptions := ReadConfig(ctx, rpcConfig)
 
-// 	rb := NewRPCClientWithOption(c, rpcOptions).(*RPCClient)
+	rb := NewRPCClientWithOption(c, rpcOptions).(*RPCClient)
 
-// 	checkDone := make(chan bool)
-// 	// occupy the concurrent slot, so the first request is queued at batching
-// 	rb.requestBatchConcurrencySlots <- true
-// 	// emit the first request
-// 	go func() {
-// 		reqContext := context.Background()
-// 		_, err = rb.SyncRequest(reqContext, &RPCRequest{
-// 			Method: "eth_getTransactionByHash",
-// 			Params: []*fftypes.JSONAny{fftypes.JSONAnyPtr(`"0xf44d5387087f61237bdb5132e9cf0f38ab20437128f7291b8df595305a1a8284"`)},
-// 		})
-// 		assert.NoError(t, err)
-// 	}()
+	checkDone := make(chan bool)
+	// occupy the concurrent slot, so the first request is queued at batching
+	rb.requestBatchConcurrencySlots <- true
+	rb.requestBatchQueue = make(chan *batchRequest, 1 /*make 1 buffer for testing*/)
+	rb.requestBatchQueue <- &batchRequest{} // fake a request to occupy the dispatch loop
+	// emit another requests
 
-// 	// emit the second request, which is now blocked on joining the batch queue
-// 	go func() {
-// 		defer close(checkDone)
-// 		reqContext := context.Background()
-// 		_, err = rb.SyncRequest(reqContext, &RPCRequest{})
-// 		assert.Regexp(t, "FF22063", err) // this checks the response hit cancel context
-// 	}()
-// 	cancelCtx()                       // cancel the context
-// 	<-rb.requestBatchConcurrencySlots // unblock the concurrency slot
-// 	<-checkDone
-// }
+	go func() {
+		reqContext := context.Background()
+		_, err = rb.SyncRequest(reqContext, &RPCRequest{
+			Method: "eth_getTransactionByHash",
+			Params: []*fftypes.JSONAny{fftypes.JSONAnyPtr(`"0xf44d5387087f61237bdb5132e9cf0f38ab20437128f7291b8df595305a1a8284"`)},
+		})
+		assert.Regexp(t, "FF22063", err) // this checks the response returned correctly with cancel and not blocked by queueing
+		close(checkDone)
+	}()
+	time.Sleep(1 * time.Second)
+	for len(rb.requestBatchQueue) == 0 {
+		// wait for queue to be occupied
+	}
+	cancelCtx()
+	<-rb.requestBatchConcurrencySlots // unblock the concurrency slot
+	<-checkDone
+}
 
 func TestBatchSyncRequestCanceledContextWhenDispatchingABatch(t *testing.T) {
 
@@ -842,14 +848,7 @@ func TestBatchRequestsTestWorkerCounts(t *testing.T) {
 				"nonce": "0x24"
 			}
 		},
-		{
-			"jsonrpc": "2.0",
-			"id": 2,
-			"result": {
-				"hash": "0x61ca9c99c1d752fb3bda568b8566edf33ba93585c64a970566e6dfb540a5cbc1",
-				"nonce": "0x10"
-			}
-		}
+		null
 	]`)
 
 	ctx := context.Background()
